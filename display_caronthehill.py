@@ -1,5 +1,4 @@
 #! /usr/bin/env python
-#XXX : You need to install PyGame before using this script 
 import pygame
 import numpy as np
 import time
@@ -35,30 +34,22 @@ def Hill(p):
      return p*p+p if p < 0 else p/(sqrt(1+5*p*p))
 
 def save_caronthehill_image(position,speed,out_file):
-    
     #Initialization of variables for visualization
     canvas_width = 400
     canvas_height = 400
     screen = pygame.display.set_mode((canvas_width, canvas_height))
     loc_width_from_bottom = 35
     loc_height_from_bottom = 70
-    pt_pos1 = -0.5
-    pt_pos2 = 0.5  
     max_height_speed = 50
     width_speed = 30
     thickness_speed_line=3
    
     #Image loading
-    car = pygame.image.load("car.png")
-    pt = pygame.image.load("pine_tree.png")
-    car.convert_alpha()
-    pt.convert_alpha()
-    size_pt = pt.get_rect().size
-    size_car = car.get_rect().size
+    carImage = pygame.image.load("car.png")
+    carImage.convert_alpha()
+    size_car = carImage.get_rect().size
     width_car = size_car[0]
     height_car = size_car[1]
-    width_pt = size_pt[0]
-    height_pt = size_pt[1]
 
     #Initialization of variables related to car on the hill
     max_speed=3
@@ -103,8 +94,6 @@ def save_caronthehill_image(position,speed,out_file):
         pix += 1
     
     #Display pine trees
-    surf.blit(pt,(round((canvas_width/2)*(1+pt_pos1)) - width_pt/2, canvas_height - round(((canvas_height)/2) * (1+Hill(pt_pos1))) - height_pt))
-    surf.blit(pt,(round((canvas_width/2)*(1+pt_pos2)) - width_pt/2, canvas_height - round(((canvas_height)/2) * (1+Hill(pt_pos2))) - height_pt))
 
     #Display the car
     x_car = round((canvas_width/2)*(1+position)) - width_car/2
@@ -112,7 +101,7 @@ def save_caronthehill_image(position,speed,out_file):
     h_car_next = Hill(position + step_hill)
     y_car = canvas_height - round(((canvas_height)/2) * (1+h_car)) - height_car
     angle= ppoints_to_angle((position,position+step_hill),(h_car,h_car_next)) 
-    rot_car, rect = rotate(car, pygame.Rect(x_car,y_car, width_car, height_car), 360-angle)
+    rot_car, rect = rotate(carImage, pygame.Rect(x_car,y_car, width_car, height_car), 360-angle)
     surf.blit(rot_car, rect) 
 
     #Display car speed
@@ -137,4 +126,4 @@ def save_caronthehill_image(position,speed,out_file):
 
 #Execution example
 if __name__=="__main__":
-    save_caronthehill_image(0,1,"out.jpeg")    
+    save_caronthehill_image(0,1,"out.png")    

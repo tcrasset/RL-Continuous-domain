@@ -1,9 +1,10 @@
 import math
 import numpy as np
 import random
-from matplotlib import pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+# from matplotlib import pyplot as plt
+# from mpl_toolkits.mplot3d import Axes3D
 
+from display_caronthehill import save_caronthehill_image
 class Domain:
 
     def __init__(self, discount, actions, integration_step):
@@ -103,14 +104,15 @@ if __name__ == '__main__':
     det_domain = Domain(DISCOUNT, ACTIONS, TIME_STEP)
     agent_det = Agent(det_domain)
 
-    position = 0
+    position = -1
     positions = []
     speeds = []
-    speed = 3
+    speed = 1
 
 
-    n_iter = 5000
+    n_iter = 1000
     for i in range (n_iter):
+        # save_caronthehill_image(position, speed, "video/test{}.jpg".format(i))
         next_pos = det_domain.nextPosition(position, speed)
         next_speed = det_domain.nextSpeed(position, speed, PLUS4)
         positions.append(next_pos)
@@ -127,23 +129,23 @@ if __name__ == '__main__':
     # plt.plot(list(range(n_iter)), speeds)
     # plt.show()
 
-    policy = {}
-    positions = np.arange(-1, 1, 0.1)
-    speeds = np.arange(-3, 3 ,0.1)
+    # policy = {}
+    # positions = np.arange(-1, 1, 0.1)
+    # speeds = np.arange(-3, 3 ,0.1)
 
-    totals = []
-    p = []
-    s = []
-    for pos in positions:
-        for sp in speeds:
-            # policy[(pos, sp)] = PLUS4
-            total = det_domain.expectedReward(pos, sp, PLUS4, 1000)
-            p.append(pos)
-            s.append(sp)
-            totals.append(total)
-            # if abs(total) > 0.0001:
-            #     print("Reward is {} at position {} with speed {}".format(total, pos,sp))
-            # print("Total reward: ", det_domain.expectedReward(pos, sp, PLUS4, 1000))
+    # totals = []
+    # p = []
+    # s = []
+    # for pos in positions:
+    #     for sp in speeds:
+    #         # policy[(pos, sp)] = PLUS4
+    #         total = det_domain.expectedReward(pos, sp, PLUS4, 1000)
+    #         p.append(pos)
+    #         s.append(sp)
+    #         totals.append(total)
+    #         # if abs(total) > 0.0001:
+    #         #     print("Reward is {} at position {} with speed {}".format(total, pos,sp))
+    #         # print("Total reward: ", det_domain.expectedReward(pos, sp, PLUS4, 1000))
 
 
     # from mpl_toolkits.mplot3d import Axes3D
@@ -157,7 +159,6 @@ if __name__ == '__main__':
     # # Make data.
     # X, Y = np.meshgrid(p, s)
     # Z = np.asarray(totals).reshape(1200,1)
-    # print(Z.shape)
     # # Plot the surface.
     # surf = ax.plot_surface(X, Y, Z,  cmap=cm.coolwarm, linewidth=0, antialiased=False)
 

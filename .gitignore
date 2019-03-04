@@ -1,2 +1,5 @@
 video/
 __pycache__/
+video_old/
+.vscode/
+*.pyc

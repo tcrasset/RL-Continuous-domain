@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import seaborn as sns
 
 from sklearn.linear_model import LinearRegression
@@ -235,6 +236,73 @@ class FittedQIterationAgent:
         self.domain = domain
         self.training_set = {}
         self.initTrainingSet()
+        self.Q_model = LinearRegression(n_jobs=-2)
+
+    def createHeatmap(self, n_iter):
+        print("Creating heatmap at iteration ", n_iter)
+        positions = np.arange(-1, 1, 0.1)
+        speeds = np.arange(-3, 3 ,0.1)
+
+        f_samples = []
+        b_samples = []
+        for p in positions:
+            for s in speeds:
+                forward, backward = self.getBestAction(p,s)
+                f_samples.append(forward)
+                b_samples.append(backward)
+
+        f_samples = np.asarray(f_samples).reshape(len(positions), len(speeds))
+
+        fig, ax = plt.subplots()
+        im = ax.imshow(f_samples)
+
+        # We want to show all ticks...
+        ax.set_xticks(np.arange(len(speeds)))
+        ax.set_yticks(np.arange(len(positions)))
+
+        # ... and label them with the respective list entries
+        ax.set_xticklabels(["{:0.1f}".format(i) for i in speeds])
+        ax.set_yticklabels(["{:0.1f}".format(i) for i in positions])
+
+        # Create colorbar
+        cbar = fig.colorbar(im, orientation="horizontal")
+        cbar.ax.set_xlabel("Reward", rotation= 0, va="top")
+
+        # Rotate the tick labels and set their alignment.
+        plt.setp(ax.get_xticklabels(), rotation=90, ha="right",
+                rotation_mode="anchor")
+
+        ax.set_title("Q(p, s, +4) after {} iterations".format(n_iter))
+        fig.tight_layout()
+        plt.savefig("FittedQ_forward_{}_iter.svg".format(n_iter))
+
+
+        b_samples = np.asarray(b_samples).reshape(len(positions), len(speeds))
+
+        fig, ax = plt.subplots()
+        im = ax.imshow(b_samples)
+
+        # We want to show all ticks...
+        ax.set_xticks(np.arange(len(speeds)))
+        ax.set_yticks(np.arange(len(positions)))
+        # ... and label them with the respective list entries
+        ax.set_xticklabels(["{:0.1f}".format(i) for i in speeds])
+        ax.set_yticklabels(["{:0.1f}".format(i) for i in positions])
+
+        # Create colorbar
+        cbar = fig.colorbar(im, orientation="horizontal")
+        cbar.ax.set_xlabel("Reward", rotation= 0, va="top")
+
+        # Rotate the tick labels and set their alignment.
+        plt.setp(ax.get_xticklabels(), rotation=90, ha="right",
+                rotation_mode="anchor")
+
+        ax.set_title("Q(p, s, -4) after {} iterations".format(n_iter))
+        fig.tight_layout()
+        plt.savefig("FittedQ_backward_{}_iter.svg".format(n_iter))
+
+
+
 
     def initTrainingSet(self):
         # 1000 episodes with starting state (p,s) = (-0.5, 0)
@@ -249,7 +317,7 @@ class FittedQIterationAgent:
                 speed = next_speed
             self.domain.reset()
 
-    def updateTrainingSet(self, Q_model):
+    def updateTrainingSet(self):
         new_training_set = {}
         for sample, reward in self.training_set.items():
             position = sample[0]
@@ -257,8 +325,8 @@ class FittedQIterationAgent:
             action = sample[2]
             _, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
             
-            forward_reward = Q_model.predict(np.array([next_pos, next_speed, 4]).reshape(1,-1))
-            backward_reward = Q_model.predict(np.array([next_pos, next_speed, -4]).reshape(1,-1))
+            forward_reward = self.Q_model.predict(np.array([next_pos, next_speed, 4]).reshape(1,-1))
+            backward_reward = self.Q_model.predict(np.array([next_pos, next_speed, -4]).reshape(1,-1))
             max_reward = backward_reward if forward_reward < backward_reward else forward_reward
 
             new_training_set[(position, speed, action)] = reward + self.domain.discount * max_reward
@@ -266,14 +334,26 @@ class FittedQIterationAgent:
         self.training_set = new_training_set
 
     def qIterationAlgo(self, n_iter):
-        Q_model = LinearRegression(n_jobs=-2)
         for i in range(n_iter):
             print("Training interation ",i)
             X = np.asarray(list(self.training_set.keys()))
             y = np.asarray(list(self.training_set.values())).reshape(-1,1)
-            Q_model.fit(X,y)
-            self.updateTrainingSet(Q_model)
-        
+            self.Q_model.fit(X,y)
+            self.updateTrainingSet()
+
+            if i in [0,4,9,19,49]:
+                self.createHeatmap(i + 1)
+
+    def getBestAction(self, position, speed):
+        forward_reward = self.Q_model.predict(np.array([position, speed, 4]).reshape(1,-1))[0][0]
+        backward_reward = self.Q_model.predict(np.array([position, speed, -4]).reshape(1,-1))[0][0]
+
+        return forward_reward, backward_reward
+        # if forward_reward > backward_reward:
+        #     return forward_reward, 4
+        # else:
+        #     return backward_reward, -4
+
 
 
 class ParametricQLearningAgent:
@@ -298,6 +378,7 @@ if __name__ == '__main__':
         -video in the current working directory
         """
         os.system("cd video && ffmpeg -r 10 -i img%05d.jpg -vcodec mpeg4 -y caronthehill_clip.mp4")
+
 
     # CONSTANTS
     PLUS4 = 4
@@ -352,6 +433,7 @@ if __name__ == '__main__':
 
 
     """ ================= Fitted Q Iteration ============================"""
-
+    NB_ITER = 50
     Q_iteration_agent = FittedQIterationAgent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP))
-    Q_iteration_agent.qIterationAlgo(50)
+    Q_iteration_agent.qIterationAlgo(NB_ITER)
+

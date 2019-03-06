@@ -6,6 +6,9 @@ import pandas as pd
 from matplotlib import pyplot as plt
 import seaborn as sns
 
+from sklearn.linear_model import LinearRegression
+from sklearn.feature_extraction import DictVectorizer
+
 from display_caronthehill import save_caronthehill_image
 
 
@@ -226,6 +229,57 @@ class Agent:
             sum_J.append(J)
         return np.mean(np.asarray(sum_J)), np.std(np.asarray(sum_J)), sum_J
 
+class FittedQIterationAgent:
+
+    def __init__(self, domain):
+        self.domain = domain
+        self.training_set = {}
+        self.initTrainingSet()
+
+    def initTrainingSet(self):
+        # 1000 episodes with starting state (p,s) = (-0.5, 0)
+        for ep in range(1000):
+            position = 0.5
+            speed = 0
+            while not self.domain.isStuck():
+                action = random.choice(self.domain.actions)
+                reward, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
+                self.training_set[(position, speed, action)] = reward
+                position = next_pos
+                speed = next_speed
+            self.domain.reset()
+
+    def updateTrainingSet(self, Q_model):
+        new_training_set = {}
+        for sample, reward in self.training_set.items():
+            position = sample[0]
+            speed = sample[1]
+            action = sample[2]
+            _, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
+            
+            forward_reward = Q_model.predict(np.array([next_pos, next_speed, 4]).reshape(1,-1))
+            backward_reward = Q_model.predict(np.array([next_pos, next_speed, -4]).reshape(1,-1))
+            max_reward = backward_reward if forward_reward < backward_reward else forward_reward
+
+            new_training_set[(position, speed, action)] = reward + self.domain.discount * max_reward
+            self.domain.reset()
+        self.training_set = new_training_set
+
+    def qIterationAlgo(self, n_iter):
+        Q_model = LinearRegression(n_jobs=-2)
+        for i in range(n_iter):
+            print("Training interation ",i)
+            X = np.asarray(list(self.training_set.keys()))
+            y = np.asarray(list(self.training_set.values())).reshape(-1,1)
+            Q_model.fit(X,y)
+            self.updateTrainingSet(Q_model)
+        
+
+
+class ParametricQLearningAgent:
+
+    def __init__(self, domain):
+        self.domain = domain
 
 if __name__ == '__main__':
 
@@ -254,14 +308,14 @@ if __name__ == '__main__':
     INTEGRATION_STEP = 0.001
 
     """ ========================== Total expected reward for a policy =========================="""
-    det_domain = Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP)
-    agent = Agent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP))
-    mean, std, points = agent.computeJ(PLUS4, 10000)
-    print("Expected reward of policy 'PLUS4': ", mean)
+    # det_domain = Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP)
+    # agent = Agent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP))
+    # mean, std, points = agent.computeJ(PLUS4, 10000)
+    # print("Expected reward of policy 'PLUS4': ", mean)
 
-    # Plot histogram
-    plt.hist(points, bins=40)
-    plt.show()
+    # # Plot histogram
+    # plt.hist(points, bins=40)
+    # plt.show()
 
     """ ========================== Graph of position, speeds and rewards over time =========================="""
     # det_domain = Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP)
@@ -295,3 +349,9 @@ if __name__ == '__main__':
     # plt.gca().legend(('position','speed', 'reward'))
     # plt.savefig("evolution.png")
     # plt.show()
+
+
+    """ ================= Fitted Q Iteration ============================"""
+
+    Q_iteration_agent = FittedQIterationAgent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP))
+    Q_iteration_agent.qIterationAlgo(50)

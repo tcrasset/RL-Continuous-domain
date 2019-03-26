@@ -1,16 +1,40 @@
+import os
+from keras.models import Sequential
+from keras.layers import Dense, Activation
+from keras.optimizers import Adam, sgd
+
+from tensorflow import ConfigProto, Session
+from keras.backend import set_session
+
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID";
+# The GPU id to use, usually either "0" or "1";
+os.environ["CUDA_VISIBLE_DEVICES"]="0";  
+
+# Just disables the warning for CPU instruction set,
+#  doesn't enable AVX/FMA
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+
+config = ConfigProto( device_count = {'GPU': 1 , 'CPU': 8} ) 
+sess = Session(config=config) 
+set_session(sess)
+
 import math
 import random
-import os
+import click
 import numpy as np
 import pandas as pd
+
+from collections import deque
 from matplotlib import pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import seaborn as sns
 
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import ExtraTreesRegressor
-from display_caronthehill import save_caronthehill_image
+from sklearn.neural_network import MLPRegressor
+from sklearn.externals import joblib
+from sklearn.metrics import mean_squared_error
 
+from display_caronthehill import save_caronthehill_image
 
 class Domain:
 
@@ -57,8 +81,7 @@ class Domain:
         ----------
         - float value for the speed
         """
-        next_speed = speed + self.integration_step * \
-            self._speedDiff(position, speed, action)
+        next_speed = speed + self.integration_step * self._speedDiff(position, speed, action)
 
         # Check if you reach a terminal state
         if abs(next_speed) > 3:
@@ -81,7 +104,8 @@ class Domain:
         return (action/(1 + self._hill_diff(position)**2)
                 - 9.81 * self._hill_diff(position) /
                 (1 + self._hill_diff(position)**2)
-                - ((self._hill_diff(position) * self._hill_diff_diff(position)) * (speed**2))/(1 + self._hill_diff(position)**2))
+                - ((self._hill_diff(position) * self._hill_diff_diff(position)) 
+                * (speed**2))/(1 + self._hill_diff(position)**2))
 
     def _hill_diff(self, position):
         """ 
@@ -125,14 +149,15 @@ class Domain:
         """ Reset the terminal state lock of the domain"""
         self.stuck = False
 
-    def expectedReward(self, starting_position, starting_speed, policy, N):
+    def expectedReward(self, starting_position, starting_speed, computePolicy, N):
         """ 
         Computes the expected reward of a state given a policy after N iterations 
         Arguments:
         ----------
         - starting_position : position of the agent in the domain
         - starting_speed : speed of the agent in the domain
-        - policy : policy that the agent will follow
+        - computePolicy : function that takes position and speed as argument and return
+            an action
 
         Returns:
         ----------
@@ -141,13 +166,12 @@ class Domain:
         total_reward = 0
         position = starting_position
         speed = starting_speed
-        #TODO:   action = policy[(starting_position, starting_speed)]
-        action = policy
         for i in range(N):
-            if not self.stuck:
-                reward, position, speed = self.rewardAtState(
-                    position, speed, action)
-                total_reward += (self.discount ** i) * reward
+            if self.stuck:
+                break
+            action = computePolicy(position, speed)
+            reward, position, speed = self.rewardAtState(position, speed, action)
+            total_reward += (self.discount ** i) * reward
         return total_reward
 
     def nextState(self, position, speed, action):
@@ -167,7 +191,7 @@ class Domain:
         """
         next_position = position
         next_speed = speed
-        for _ in range(math.floor(self.ratio)):
+        for _ in range(int(self.ratio)):
             next_position = self._nextPosition(position, speed)
             next_speed = self._nextSpeed(position, speed, action)
             position = next_position
@@ -220,217 +244,427 @@ class Agent:
         - 
         """
         sum_J = []
-        for n in range(N):
-            print("Sample ", n)
-            position = random.uniform(-1.0, 1.0)
-            speed = random.uniform(-3.0, 3.0)
-            J = self.domain.expectedReward(position, speed, policy, 250)
-            self.domain.reset()
-            sum_J.append(J)
+
+        with click.progressbar(range(N)) as bar:
+            for n in bar:
+                print("Sample ", n)
+                position = random.uniform(-1.0, 1.0)
+                speed = random.uniform(-3.0, 3.0)
+                J = self.domain.expectedReward(position, speed, policy, 200)
+                self.domain.reset()
+                sum_J.append(J)
         return np.mean(np.asarray(sum_J)), np.std(np.asarray(sum_J)), sum_J
-
-
 
 
 class FittedQIterationAgent():
 
-    def __init__(self, domain, n_episodes):
+    def __init__(self, domain, model, n_episodes):
         self.domain = domain
-        self.training_set = {}
+        self.training_set = None
+        self.four_tuples = None
         self.initTrainingSet(n_episodes)
-        self.Q_model = None
+        self.Q_model = model
 
 
     def initTrainingSet(self, n_episodes):
         # 1000 episodes with starting state (p,s) = (-0.5, 0)
+        test_tuples = []
         for ep in range(n_episodes):
-            position = 0.5
+            position = -0.5
             speed = 0
+            # Explore the domain until reaching a terminal state
             while not self.domain.isStuck():
                 action = random.choice(self.domain.actions)
                 reward, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
-                self.training_set[(position, speed, action )] = reward
+                test_tuples.append([position, speed, action, reward, next_pos, next_speed])
                 position = next_pos
                 speed = next_speed
+            # One additional step
+            action = random.choice(self.domain.actions)
+            reward, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
+            test_tuples.append([position, speed, action, reward, next_pos, next_speed])
             self.domain.reset()
+        # Fill training set
+        self.four_tuples = np.array(test_tuples)
+        self.training_set = self.four_tuples[:,:4].copy()
 
-    def createHeatmap(self, n_iter, modeltype):
-        print("Creating heatmap at iteration ", n_iter)
-        positions = np.arange(-1, 1, 0.1)
-        speeds = np.arange(-3, 3 ,0.1)
 
-        f_samples = []
-        b_samples = []
+    def createRewardHeatmap(self, n_iter, modeltype):
+        print("Creating reward heatmap at iteration ", n_iter)
+        positions = np.linspace(-1, 1, 100)
+        speeds = np.linspace(-3, 3 ,100)
+
+        forward_test_set = []
+        backward_test_set = []
+
         for p in positions:
             for s in speeds:
-                forward, backward = self.getBestAction(p,s)
-                f_samples.append(forward)
-                b_samples.append(backward)
+                forward_test_set.append([p, s, 4])
+                backward_test_set.append([p, s, -4])
+        
+        forward_rewards = self.Q_model.predict(forward_test_set).reshape(len(positions), len(speeds))
+        backward_rewards = self.Q_model.predict(backward_test_set).reshape(len(positions), len(speeds))
+        
+        
+        # Heatmap of Q(.,4)
+        cs = plt.contourf(positions, speeds, forward_rewards, cmap='Spectral')
+        plt.colorbar(cs)
+        plt.title("Q(p, s, +4) after {} iterations".format(n_iter))
+        plt.xlabel("Position")
+        plt.ylabel("Speed")
+        plt.savefig("Figures/{}/FittedQ_{}_forward_reward_{}_iter.svg".format(modeltype,modeltype, n_iter))
+        plt.clf()
 
-        f_samples = np.asarray(f_samples).reshape(len(positions), len(speeds))
-
-        fig, ax = plt.subplots()
-        im = ax.imshow(f_samples)
-
-        # We want to show all ticks...
-        ax.set_xticks(np.arange(len(speeds)))
-        ax.set_yticks(np.arange(len(positions)))
-
-        # ... and label them with the respective list entries
-        ax.set_xticklabels(["{:0.1f}".format(i) for i in speeds])
-        ax.set_yticklabels(["{:0.1f}".format(i) for i in positions])
-
-        # Create colorbar
-        cbar = fig.colorbar(im, orientation="horizontal")
-        cbar.ax.set_xlabel("Reward", rotation= 0, va="top")
-
-        # Rotate the tick labels and set their alignment.
-        plt.setp(ax.get_xticklabels(), rotation=90, ha="right",
-                rotation_mode="anchor")
-
-        ax.set_title("Q(p, s, +4) after {} iterations".format(n_iter))
-        fig.tight_layout()
-        plt.savefig("FittedQ_{}_forward_{}_iter.svg".format(modeltype, n_iter))
+        # Heatmap of Q(.,-4)
+        cs = plt.contourf(positions, speeds, backward_rewards, cmap='Spectral')
+        plt.colorbar(cs)
+        plt.title("Q(p, s, -4) after {} iterations".format(n_iter))
+        plt.xlabel("Position")
+        plt.ylabel("Speed")
+        plt.savefig("Figures/{}/FittedQ_{}_backward_reward_{}_iter.svg".format(modeltype,modeltype, n_iter))
+        plt.clf()
 
 
-        b_samples = np.asarray(b_samples).reshape(len(positions), len(speeds))
+    def createPolicyHeatmap(self, n_iter, modeltype):
+        print("Creating policy heatmap at iteration ", n_iter)
+        positions = np.linspace(-1, 1, 100)
+        speeds = np.linspace(-3, 3 ,100)
 
-        fig, ax = plt.subplots()
-        im = ax.imshow(b_samples)
+        policy = []
+        forward_samples = []
+        backward_samples = []
+        for p in positions:
+            for s in speeds:
+                forward_samples.append([p,s,4])
+                backward_samples.append([p,s,-4])
+        forward_pred = self.Q_model.predict(np.array(forward_samples))
+        backward_pred = self.Q_model.predict(np.array(backward_samples))
 
-        # We want to show all ticks...
-        ax.set_xticks(np.arange(len(speeds)))
-        ax.set_yticks(np.arange(len(positions)))
-        # ... and label them with the respective list entries
-        ax.set_xticklabels(["{:0.1f}".format(i) for i in speeds])
-        ax.set_yticklabels(["{:0.1f}".format(i) for i in positions])
+        for f, b in zip(forward_pred, backward_pred):
+            policy.append(4 if f > b else -4)
+        
+        policy = np.array(policy).reshape(len(positions), len(speeds))
 
-        # Create colorbar
-        cbar = fig.colorbar(im, orientation="horizontal")
-        cbar.ax.set_xlabel("Reward", rotation= 0, va="top")
+        # Heatmap of policy
+        cs = plt.contourf(positions, speeds, policy, cmap='Spectral')
+        plt.colorbar(cs)
+        plt.title("Policy after {} iterations".format(n_iter))
+        plt.xlabel("Position")
+        plt.ylabel("Speed")
+        plt.savefig("Figures/{}/FittedQ_{}_policy_{}_iter.svg".format(modeltype, modeltype, n_iter))
+        plt.clf()
 
-        # Rotate the tick labels and set their alignment.
-        plt.setp(ax.get_xticklabels(), rotation=90, ha="right",
-                rotation_mode="anchor")
 
-        ax.set_title("Q(p, s, -4) after {} iterations".format(n_iter))
-        fig.tight_layout()
-        plt.savefig("FittedQ_{}_backwardward_{}_iter.svg".format(modeltype, n_iter))
-
-    def qIterationAlgo(self, n_iter):
+    def qIterationAlgo(self, n_iter, modeltype):
+        avg_exp_rewards = []
+        Q_diff = []
         for i in range(n_iter):
-            print("Training iteration ",i)
-            X = np.asarray(list(self.training_set.keys()))
-            y = np.asarray(list(self.training_set.values())).reshape(-1)
+            print("Training iteration {} ...".format(i+1))
+            X = self.training_set[:,:3]
+            y = self.training_set[:,3].reshape(-1)
+            # # Computing Q difference (old_Q)
+            # if i > 0:
+            #     old_Q_predict = self.Q_model.predict(self.four_tuples[:,:3])
+            
             self.Q_model.fit(X,y)
+
+            # # Computing Q difference (new_Q)
+            # new_Q_predict = self.Q_model.predict(self.four_tuples[:,:3])
+            # if i > 0:
+            #     Q_diff.append(mean_squared_error(old_Q_predict,  new_Q_predict))
+
             self.updateTrainingSet()
 
-            if i in [0,4,9,19,49]:
-                self.createHeatmap(i + 1)
+            # Saving machine learning model
+            filename = "Models/{}/{}{}.pkl".format(modeltype, modeltype,i)
+            print("Saving machine learning model as {}".format(filename))
+            joblib.dump(self.Q_model, filename)
+
+            # # Creating heatmaps
+            # if i in [0,4,9,19,49]:
+            #     self.createRewardHeatmap(i + 1, modeltype)
+            #     self.createPolicyHeatmap(i + 1, modeltype)
+            
+            if i in [0,4,9,14,19,24,29,34,39,44,49]:
+                print("Computing average expected reward ...")
+                avg_expected_reward = self.computeJ()
+                print("Average expected reward at iteration {} : {}".format(i+1, avg_expected_reward))
+                avg_exp_rewards.append(avg_expected_reward)
+
+        # Plot average expected reward J
+        plt.plot([0,4,9,14,19,24,29,34,39,44,49],avg_exp_rewards)
+        plt.xlabel("Iteration")
+        plt.ylabel("Expected reward")
+        plt.savefig("Figures/{}/FittedQ_{}_expReward.svg".format(modeltype, modeltype))
+
+        # # Plot Q difference wrt. the iteration
+        # print("Plotting Q difference for ", modeltype)
+        # plt.figure()
+        # plt.plot(range(1,n_iter), Q_diff)
+        # plt.xlabel("Iteration")
+        # plt.ylabel("Q difference")
+        # plt.savefig("Figures/{}/FittedQ_{}_qdiff.svg".format(modeltype,modeltype))
+        # plt.clf()   
+
 
     def updateTrainingSet(self):
-        pass
-
-class FittedQIterationLinearAgent(FittedQIterationAgent):
-
-    def __init__(self, domain, n_episodes):
-        super().__init__(domain, n_episodes)
-        self.n_episodes = n_episodes
-        self.Q_model = LinearRegression(n_jobs=-2)
-
-    def updateTrainingSet(self):
-        new_training_set = {}
-        for ep in range(self.n_episodes):
-            position = 0.5
-            speed = 0
-            while not self.domain.isStuck():
-                action = random.choice(self.domain.actions)
-                reward, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
-                
-                forward_reward = self.Q_model.predict(np.array([next_pos, next_speed, 4]).reshape(1,-1))[0]
-                backward_reward = self.Q_model.predict(np.array([next_pos, next_speed, -4]).reshape(1,-1))[0]
-                max_reward = backward_reward if forward_reward < backward_reward else forward_reward
-
-                new_training_set[(position, speed, action)] = reward + self.domain.discount * max_reward
-                position = next_pos
-                speed = next_speed
-            self.domain.reset()
-        self.training_set = new_training_set
+        # Find the max reward between Q(x_t+1, 4) and Q(x_t+1, -4)
+        forward_set = np.c_[self.four_tuples[:,-2:], np.repeat(4,self.training_set.shape[0])]
+        backward_set = np.c_[self.four_tuples[:,-2:], np.repeat(-4,self.training_set.shape[0])]
+        forward_reward = self.Q_model.predict(forward_set)
+        backward_reward = self.Q_model.predict(backward_set)
+        max_reward = np.maximum(forward_reward, backward_reward)
+        #Update training set rewards
+        self.training_set[:,-1] = self.four_tuples[:,3] + self.domain.discount * max_reward
 
 
-    def getBestAction(self, position, speed):
-        forward_reward = self.Q_model.predict(np.array([position, speed, 4]).reshape(1,-1))[0]
-        backward_reward = self.Q_model.predict(np.array([position, speed, -4]).reshape(1,-1))[0]
-        return forward_reward, backward_reward
-        # if forward_reward > backward_reward:
-        #     return forward_reward, 4
-        # else:
-        #     return backward_reward, -4
+    def computeJ(self):
+        """
+        Computes the average expected reward for policy using a sequence 
+        of initial states
+        Arguments:
+        ----------
+        Returns:
+        ----------
+        - 
+        """
+        sum_states = []
+        positions = np.arange(-1, 1, 0.125)
+        speeds = np.arange(-3, 3 ,0.375)
 
-    def computePolicy():
-        forward_reward = self.Q_model.predict(np.array([position, speed, 4]).reshape(1,-1))[0]
-        backward_reward = self.Q_model.predict(np.array([position, speed, -4]).reshape(1,-1))[0]
+        
+        with click.progressbar(positions) as pos:
+            for p in pos:
+                for s in speeds:
+                    J = self.domain.expectedReward(p, s, self.computePolicy, 100)
+                    self.domain.reset()
+                    sum_states.append(J)
+        return np.mean(np.asarray(sum_states))
 
-        return forward_reward, backward_reward
-        # if forward_reward > backward_reward:
-        #     return forward_reward, 4
-        # else:
-        #     return backward_reward, -4
+
+    def computePolicy(self, position, speed):
+        to_pred = [[position, speed, 4], [position, speed, -4]]
+        prediction = self.Q_model.predict(to_pred)
+        return 4 if prediction[0] > prediction[1] else -4
 
 
-class FittedQIterationTreesAgent(FittedQIterationAgent):
+    def plotTrajetory(self, modeltype):
 
-    def __init__(self, domain, n_episodes):
-        super().__init__(domain, n_episodes)
-        self.n_episodes = n_episodes
-        self.Q_model = ExtraTreesRegressor(n_jobs=-2)
+        positions= []
+        speeds = []
 
-    def updateTrainingSet(self):
-        new_training_set = {}
-        for ep in range(self.n_episodes):
-            print("Episode", ep)
-            position = 0.5
-            speed = 0
-            while not self.domain.isStuck():
-                action = random.choice(self.domain.actions)
-                reward, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
-                
-                forward_reward = self.Q_model.predict(np.array([next_pos, next_speed, 4]).reshape(1,-1))
-                backward_reward = self.Q_model.predict(np.array([next_pos, next_speed, -4]).reshape(1,-1))
-                max_reward = backward_reward if forward_reward < backward_reward else forward_reward
+        position = -0.5
+        speed = 0
+        positions.append(position)
+        speeds.append(speed)
+        i = 0
+        print("Plotting trajectory")
+        # Computing trajectory with policy of Q_max_iter
+        while not self.domain.isStuck() and i < 100:
+            action = self.computePolicy(position, speed)
+            position, speed = self.domain.nextState(position, speed, action)
+            positions.append(position)
+            speeds.append(speed)
+            i += 1
+        self.domain.reset()
 
-                new_training_set[(position, speed, action)] = reward + self.domain.discount * max_reward
-                position = next_pos
-                speed = next_speed
-            self.domain.reset()
-        self.training_set = new_training_set
-
-    def getBestAction(self, position, speed):
-        forward_reward = self.Q_model.predict(np.array([position, speed, 4]).reshape(1,-1))
-        backward_reward = self.Q_model.predict(np.array([position, speed, -4]).reshape(1,-1))
-
-        return forward_reward, backward_reward
-        # if forward_reward > backward_reward:
-        #     return forward_reward, 4
-        # else:
-        #     return backward_reward, -4
-
-    def computePolicy():
-        forward_reward = self.Q_model.predict(np.array([position, speed, 4]).reshape(1,-1))
-        backward_reward = self.Q_model.predict(np.array([position, speed, -4]).reshape(1,-1))
-
-        return forward_reward, backward_reward
-        # if forward_reward > backward_reward:
-        #     return forward_reward, 4
-        # else:
-        #     return backward_reward, -4
-
+        #Plotting
+        plt.figure()
+        plt.plot(positions, speeds)
+        plt.xlabel("Position")
+        plt.xlim(-1,1)
+        plt.ylim(-3,3)
+        plt.ylabel("Speed")
+        plt.savefig("Figures/{}/FittedQ_{}_trajectory.svg".format(modeltype, modeltype))
+        plt.clf()
 
 
 class ParametricQLearningAgent:
 
-    def __init__(self, domain):
+    def __init__(self, domain, n_episodes):
+
+
         self.domain = domain
+        self.n_episodes = n_episodes
+        self.learning_rate = 0.05
+        self.batch_size = 32
+        self.epsilon = 0.1  # exploration rate
+        self.epsilon_decay = 0.99
+        self.model = self.create_model()
+        self.memory = deque(maxlen=2000)
+        
+    def create_model(self):
+        # Neural Net for Deep Q Learning
+        model = Sequential()
+        # Input Layer of state size(3) and Hidden Layer with 24 nodes
+        model.add(Dense(24, input_shape=(3,), activation='relu'))
+        # Hidden layer with 24 nodes
+        model.add(Dense(24, activation='relu'))
+        # Output Layer with reward
+        model.add(Dense(1, activation='linear'))
+        # Create the model based on the information above
+        model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
+
+        return model
+
+
+    def chooseAction(self, position, speed):
+        """Epsilon greedy"""
+
+        # Random action
+        if np.random.rand() <= self.epsilon:
+            return random.choice(self.domain.actions)
+
+        # Action maximising Q
+        prediction_f = self.model.predict(np.array([position, speed, 4]).reshape(1,3))
+        prediction_b = self.model.predict(np.array([position, speed, -4]).reshape(1,3))
+        return 4 if prediction_f > prediction_b else -4   
+
+    def replay(self, batch_size):
+        # Sample minibatch
+        minibatch = random.sample(self.memory, batch_size)
+        for position, speed, action, reward, next_position, next_speed in minibatch:
+            # predict the future discounted reward
+            forward_sample = np.array([next_position, next_speed, 4]).reshape(1,3)
+            backward_sample = np.array([next_position, next_speed, -4]).reshape(1,3)
+            forward_reward = self.model.predict(forward_sample)[0]
+            backward_reward = self.model.predict(backward_sample)[0]
+            target = reward + self.domain.discount * max(forward_reward, backward_reward)
+
+            # Train the Neural Net with the state and target
+            self.model.fit(np.array([position, speed, action]).reshape(1,3), target, epochs=1, verbose=0)
+        self.epsilon *= self.epsilon_decay
+
+
+    def train(self):
+        # 1000 episodes with starting state (p,s) = (-0.5, 0)
+        for ep in range(self.n_episodes):
+            position = -0.5
+            speed = 0
+            i = 0
+            while not self.domain.isStuck() and i < 200:
+                action = self.chooseAction(position, speed)
+                reward, next_pos, next_speed = self.domain.rewardAtState(position, speed, action)
+                self.memory.append((position, speed, action, reward, next_pos, next_speed))
+                position = next_pos
+                speed = next_speed
+                i += 1
+            self.domain.reset()
+            print("episode: {}/{}".format(ep, self.n_episodes))
+            
+            if (ep + 1) %50 == 0:
+                self.createRewardHeatmap(ep + 1, 'mlp')
+                self.createPolicyHeatmap(ep + 1, 'mlp')
+            
+            # Refit model on 32 samples
+            if len(self.memory) < self.batch_size:
+                self.replay(len(self.memory))
+            else:
+                self.replay(self.batch_size)
+                
+
+    def computePolicy(self, position, speed):
+        # Action maximising Q
+        prediction_f = self.model.predict(np.array([position, speed, 4]).reshape(1,3))
+        prediction_b = self.model.predict(np.array([position, speed, -4]).reshape(1,3))
+        return 4 if prediction_f > prediction_b else -4 
+
+    def plotTrajetory(self, modeltype):
+
+        positions= []
+        speeds = []
+
+        position = -0.5
+        speed = 0
+        positions.append(position)
+        speeds.append(speed)
+        i = 0
+        print("Plotting trajectory")
+        # Computing trajectory with policy of Q_max_iter
+        while not self.domain.isStuck() and i < 100:
+            action = self.computePolicy(position, speed)
+            position, speed = self.domain.nextState(position, speed, action)
+            positions.append(position)
+            speeds.append(speed)
+            i += 1
+        self.domain.reset()
+
+        #Plotting
+        plt.figure()
+        plt.plot(positions, speeds)
+        plt.xlabel("Position")
+        plt.xlim(-1,1)
+        plt.ylim(-3,3)
+        plt.ylabel("Speed")
+        plt.savefig("Figures/paramq/ParamQ_{}_trajectory.svg".format(modeltype))
+        plt.clf()
+
+
+    def createRewardHeatmap(self, episode, modeltype):
+        print("Creating reward heatmap at episode ", episode)
+        positions = np.linspace(-1, 1, 100)
+        speeds = np.linspace(-3, 3 ,100)
+
+        forward_rewards = []
+        backward_rewards = []
+        forward_rewards
+        for p in positions:
+            for s in speeds:
+                forward_rewards.append(self.model.predict(np.array([p, s, 4]).reshape(1,3)))
+                backward_rewards.append(self.model.predict(np.array([p, s, -4]).reshape(1,3)))
+        
+        forward_rewards = np.array(forward_rewards).reshape(len(positions), len(speeds))
+        backward_rewards = np.array(backward_rewards).reshape(len(positions), len(speeds))
+        
+        
+        # Heatmap of Q(.,4)
+        cs = plt.contourf(positions, speeds, forward_rewards, cmap='Spectral')
+        plt.colorbar(cs)
+        plt.title("Q(p, s, +4) after {} episodes".format(episode))
+        plt.xlabel("Position")
+        plt.ylabel("Speed")
+        plt.savefig("Figures/paramq/ParamQ_{}_forward_reward{}_ep.svg".format(modeltype, episode))
+        plt.clf()
+
+        # Heatmap of Q(.,-4)
+        cs = plt.contourf(positions, speeds, backward_rewards, cmap='Spectral')
+        plt.colorbar(cs)
+        plt.title("Q(p, s, -4) after {} episodes".format(episode))
+        plt.xlabel("Position")
+        plt.ylabel("Speed")
+        plt.savefig("Figures/paramq/ParamQ_{}_backward_reward{}_ep.svg".format(modeltype, episode))
+        plt.clf()
+
+
+    def createPolicyHeatmap(self, episode, modeltype):
+        print("Creating policy heatmap at iteration ", episode)
+        policy = []
+        positions = np.linspace(-1, 1, 100)
+        speeds = np.linspace(-3, 3 ,100)
+
+        forward_rewards = []
+        backward_rewards = []
+        forward_rewards
+        for p in positions:
+            for s in speeds:
+                forward_rewards.append(self.model.predict(np.array([p, s, 4]).reshape(1,3)))
+                backward_rewards.append(self.model.predict(np.array([p, s, -4]).reshape(1,3)))
+        
+        for f, b in zip(forward_rewards, backward_rewards):
+            policy.append(4 if f > b else -4)
+        
+        policy = np.array(policy).reshape(len(positions), len(speeds))
+
+        # Heatmap of policy
+        cs = plt.contourf(positions, speeds, policy, cmap='Spectral')
+        plt.colorbar(cs)
+        plt.title("Policy after {} episodes".format(episode))
+        plt.xlabel("Position")
+        plt.ylabel("Speed")
+        plt.savefig("Figures/paramq/ParamQ_{}_policy_{}_ep.svg".format(modeltype, episode))
+        plt.clf()
+
+
 
 if __name__ == '__main__':
 
@@ -499,12 +733,30 @@ if __name__ == '__main__':
     # plt.title("Evolution of the car on the hill over time")
     # plt.xlabel("Time (in 0.1s)")
     # plt.gca().legend(('position','speed', 'reward'))
-    # plt.savefig("evolution.png")
+    # plt.savefig("Figures/evolution.png")
     # plt.show()
 
 
     """ ================= Fitted Q Iteration ============================"""
     NB_ITER = 50
-    Q_iteration_agent = FittedQIterationLinearAgent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP), 1000)
-    Q_iteration_agent.qIterationAlgo(NB_ITER)
+    linear_model = LinearRegression(n_jobs=-2)
+    Q_iteration_agentLINEAR = FittedQIterationAgent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP),linear_model, 1000)
+    Q_iteration_agentLINEAR.qIterationAlgo(NB_ITER,"linear")
+    Q_iteration_agentLINEAR.plotTrajetory("linear")
 
+    extratrees_model = ExtraTreesRegressor(n_estimators=50, n_jobs=-2)
+    Q_iteration_agentTREES = FittedQIterationAgent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP),extratrees_model, 1000)
+    Q_iteration_agentTREES.qIterationAlgo(NB_ITER, "trees")
+    Q_iteration_agentTREES.plotTrajetory("trees")
+    
+    mlp_model =  MLPRegressor(activation='tanh', solver='adam', max_iter=2000, hidden_layer_sizes= (5,5))
+    Q_iteration_agentMLP = FittedQIterationAgent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP),mlp_model, 1000)
+    Q_iteration_agentMLP.qIterationAlgo(NB_ITER,"mlp")
+    Q_iteration_agentMLP.plotTrajetory("mlp")
+
+
+    """ ================= Parametric Q ============================"""
+
+    paramqMLP = ParametricQLearningAgent(Domain(DISCOUNT, ACTIONS, INTEGRATION_STEP, DISCRETE_STEP), 1000)
+    paramqMLP.train()
+    paramqMLP.plotTrajetory("mlp")
